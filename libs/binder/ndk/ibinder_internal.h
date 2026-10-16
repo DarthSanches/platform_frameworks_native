@@ -193,6 +193,9 @@ inline ::android::status_t AIBinder_isMediaDrmDeviceUniqueIdRequest(const AIBind
     if (!clazz->isMediaDrmPlugin() || code < FIRST_CALL_TRANSACTION) {
         return ::android::OK;
     }
+    if (code - FIRST_CALL_TRANSACTION >= clazz->getTransactionCodeToFunctionLength()) {
+        return ::android::OK;
+    }
     const char* const functionName = AIBinder_Class_getFunctionName(clazz, code);
     if (functionName == nullptr || strcmp(functionName, "getPropertyByteArray") != 0) {
         return ::android::OK;

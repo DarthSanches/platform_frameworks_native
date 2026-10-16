@@ -1516,6 +1516,21 @@ TEST(NdkBinder, MediaDrmTransactionWithoutFunctionNameTableIsNotParsed) {
     EXPECT_EQ(0u, data.dataPosition());
 }
 
+TEST(NdkBinder, MediaDrmMetadataTransactionsAreNotParsed) {
+    const char* functions[] = {"getPropertyByteArray"};
+    AIBinder_Class* clazz = AIBinder_Class_define("android.hardware.drm.IDrmPlugin", EmptyOnCreate,
+                                                  EmptyOnDestroy, EmptyOnTransact);
+    AIBinder_Class_setTransactionCodeToFunctionNameMap(clazz, functions, 1);
+    Parcel data;
+
+    for (const transaction_code_t code : {0x00fffffd, 0x00fffffe}) {
+        bool isRequest = true;
+        EXPECT_EQ(OK, AIBinder_isMediaDrmDeviceUniqueIdRequest(clazz, code, data, &isRequest));
+        EXPECT_FALSE(isRequest);
+        EXPECT_EQ(0u, data.dataPosition());
+    }
+}
+
 TEST(NdkBinder, MediaDrmStringPropertyMethodIsNotIntercepted) {
     const char* functions[] = {"getPropertyString"};
     AIBinder_Class* clazz = AIBinder_Class_define("android.hardware.drm.IDrmPlugin", EmptyOnCreate,
