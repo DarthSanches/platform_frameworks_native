@@ -36,6 +36,8 @@
 #include <binder/IServiceManager.h>
 #include <binder/IShellCallback.h>
 #if defined(__ANDROID__)
+#include <android/os/BnMediaDrmIdAccessService.h>
+#include <fakeservicemanager/FakeServiceManager.h>
 #include <private/android_filesystem_config.h>
 #endif
 #include <sys/prctl.h>
@@ -76,6 +78,23 @@ void* MediaDrmTestOnCreate(void* args) {
 
 void MediaDrmTestOnDestroy(void*) {}
 
+class MediaDrmTestPolicyService final : public ::android::os::BnMediaDrmIdAccessService {
+   public:
+    ::android::binder::Status isAllowedFromDrmHal(int32_t uid, int32_t pid,
+                                                   bool* allowed) override {
+        ++callCount;
+        lastUid = uid;
+        lastPid = pid;
+        *allowed = allowAccess;
+        return ::android::binder::Status::ok();
+    }
+
+    int callCount = 0;
+    int32_t lastUid = -1;
+    int32_t lastPid = -1;
+    bool allowAccess = false;
+};
+
 binder_status_t MediaDrmTestOnTransact(AIBinder* binder, transaction_code_t, const AParcel*,
                                        AParcel* out) {
     ++*static_cast<int*>(AIBinder_getUserData(binder));
@@ -84,16 +103,27 @@ binder_status_t MediaDrmTestOnTransact(AIBinder* binder, transaction_code_t, con
 }
 
 int runMediaDrmInterceptionHelper() {
+    sp<FakeServiceManager> serviceManager = sp<FakeServiceManager>::make();
+    sp<MediaDrmTestPolicyService> policyService = sp<MediaDrmTestPolicyService>::make();
+    if (serviceManager->addService(::android::os::IMediaDrmIdAccessService::SERVICE_NAME(),
+                                   policyService) != OK) {
+        LOG(ERROR) << "failed to register fake MediaDrm policy service";
+        return EXIT_FAILURE;
+    }
+    setDefaultServiceManager(serviceManager);
+
     AIBinder_Class* clazz =
             AIBinder_Class_define("android.hardware.drm.IDrmPlugin", MediaDrmTestOnCreate,
                                   MediaDrmTestOnDestroy, MediaDrmTestOnTransact);
+    const char* functions[] = {"getPropertyByteArray"};
+    AIBinder_Class_setTransactionCodeToFunctionNameMap(clazz, functions, 1);
     int implementationCallCount = 0;
     ndk::SpAIBinder binder(AIBinder_new(clazz, &implementationCallCount));
 
-    const auto transact = [&](const char* propertyName, ndk::ScopedAStatus* status) {
+    const auto transact = [&](std::string_view propertyName, ndk::ScopedAStatus* status) {
         AParcel* in = nullptr;
         if (AIBinder_prepareTransaction(binder.get(), &in) != STATUS_OK ||
-            AParcel_writeString(in, propertyName, strlen(propertyName)) != STATUS_OK) {
+            AParcel_writeString(in, propertyName.data(), propertyName.size()) != STATUS_OK) {
             return false;
         }
         ndk::ScopedAParcel out;
@@ -118,13 +148,49 @@ int runMediaDrmInterceptionHelper() {
         LOG(ERROR) << "implementation called for denied request";
         return EXIT_FAILURE;
     }
+    if (policyService->callCount != 1 || policyService->lastUid != AID_APP_START ||
+        policyService->lastPid != getpid()) {
+        LOG(ERROR) << "policy service did not receive the caller identity";
+        return EXIT_FAILURE;
+    }
+
+    ndk::ScopedAStatus embeddedNullDeniedStatus;
+    const std::string embeddedNullPropertyName = std::string("deviceUniqueId") + '\0' + "suffix";
+    if (!transact(embeddedNullPropertyName, &embeddedNullDeniedStatus)) {
+        LOG(ERROR) << "deviceUniqueId with embedded null transaction failed";
+        return EXIT_FAILURE;
+    }
+    if (AStatus_getExceptionCode(embeddedNullDeniedStatus.get()) != EX_SERVICE_SPECIFIC ||
+        AStatus_getServiceSpecificError(embeddedNullDeniedStatus.get()) != 4) {
+        LOG(ERROR) << "unexpected denial status for deviceUniqueId with embedded null: "
+                   << AStatus_getDescription(embeddedNullDeniedStatus.get());
+        return EXIT_FAILURE;
+    }
+    if (implementationCallCount != 0) {
+        LOG(ERROR) << "implementation called for denied request with embedded null";
+        return EXIT_FAILURE;
+    }
+    if (policyService->callCount != 2 || policyService->lastUid != AID_APP_START ||
+        policyService->lastPid != getpid()) {
+        LOG(ERROR) << "policy service did not receive the embedded-null request";
+        return EXIT_FAILURE;
+    }
+
+    policyService->allowAccess = true;
+    ndk::ScopedAStatus allowedStatus;
+    if (!transact("deviceUniqueId", &allowedStatus) || !AStatus_isOk(allowedStatus.get()) ||
+        implementationCallCount != 1 || policyService->callCount != 3) {
+        LOG(ERROR) << "policy-approved request did not reach the implementation";
+        return EXIT_FAILURE;
+    }
 
     ndk::ScopedAStatus unrelatedStatus;
     if (!transact("vendorDefinedProperty", &unrelatedStatus)) {
         LOG(ERROR) << "unrelated property transaction failed";
         return EXIT_FAILURE;
     }
-    if (!AStatus_isOk(unrelatedStatus.get()) || implementationCallCount != 1) {
+    if (!AStatus_isOk(unrelatedStatus.get()) || implementationCallCount != 2 ||
+        policyService->callCount != 3) {
         LOG(ERROR) << "unrelated property was intercepted";
         return EXIT_FAILURE;
     }
@@ -1403,6 +1469,23 @@ TEST(NdkBinder, MediaDrmDeviceUniqueIdRequestPreservesParcelPosition) {
     EXPECT_EQ(0u, data.dataPosition());
 }
 
+TEST(NdkBinder, MediaDrmDeviceUniqueIdWithEmbeddedNullIsIntercepted) {
+    const char* functions[] = {"getPropertyByteArray"};
+    AIBinder_Class* clazz = AIBinder_Class_define("android.hardware.drm.IDrmPlugin", EmptyOnCreate,
+                                                  EmptyOnDestroy, EmptyOnTransact);
+    AIBinder_Class_setTransactionCodeToFunctionNameMap(clazz, functions, 1);
+    Parcel data;
+    const std::string propertyName = std::string("deviceUniqueId") + '\0' + "suffix";
+    ASSERT_EQ(OK, data.writeUtf8AsUtf16(propertyName));
+    data.setDataPosition(0);
+
+    bool isRequest = false;
+    EXPECT_EQ(OK, AIBinder_isMediaDrmDeviceUniqueIdRequest(clazz, FIRST_CALL_TRANSACTION, data,
+                                                           &isRequest));
+    EXPECT_TRUE(isRequest);
+    EXPECT_EQ(0u, data.dataPosition());
+}
+
 TEST(NdkBinder, MediaDrmUnrelatedPropertyIsNotIntercepted) {
     const char* functions[] = {"getPropertyByteArray"};
     AIBinder_Class* clazz = AIBinder_Class_define("android.hardware.drm.IDrmPlugin", EmptyOnCreate,
@@ -1419,7 +1502,7 @@ TEST(NdkBinder, MediaDrmUnrelatedPropertyIsNotIntercepted) {
     EXPECT_EQ(0u, data.dataPosition());
 }
 
-TEST(NdkBinder, MediaDrmDeviceUniqueIdDetectedWithoutFunctionNameTable) {
+TEST(NdkBinder, MediaDrmTransactionWithoutFunctionNameTableIsNotParsed) {
     AIBinder_Class* clazz = AIBinder_Class_define("android.hardware.drm.IDrmPlugin", EmptyOnCreate,
                                                   EmptyOnDestroy, EmptyOnTransact);
     Parcel data;
@@ -1429,22 +1512,7 @@ TEST(NdkBinder, MediaDrmDeviceUniqueIdDetectedWithoutFunctionNameTable) {
     bool isRequest = false;
     EXPECT_EQ(OK, AIBinder_isMediaDrmDeviceUniqueIdRequest(clazz, FIRST_CALL_TRANSACTION, data,
                                                            &isRequest));
-    EXPECT_TRUE(isRequest);
-    EXPECT_EQ(0u, data.dataPosition());
-}
-
-TEST(NdkBinder, MediaDrmDeviceUniqueIdWithTrailingDataDetectedWithoutFunctionNameTable) {
-    AIBinder_Class* clazz = AIBinder_Class_define("android.hardware.drm.IDrmPlugin", EmptyOnCreate,
-                                                  EmptyOnDestroy, EmptyOnTransact);
-    Parcel data;
-    ASSERT_EQ(OK, data.writeUtf8AsUtf16(std::string("deviceUniqueId")));
-    ASSERT_EQ(OK, data.writeUtf8AsUtf16(std::string("value")));
-    data.setDataPosition(0);
-
-    bool isRequest = false;
-    EXPECT_EQ(OK, AIBinder_isMediaDrmDeviceUniqueIdRequest(clazz, FIRST_CALL_TRANSACTION, data,
-                                                           &isRequest));
-    EXPECT_TRUE(isRequest);
+    EXPECT_FALSE(isRequest);
     EXPECT_EQ(0u, data.dataPosition());
 }
 

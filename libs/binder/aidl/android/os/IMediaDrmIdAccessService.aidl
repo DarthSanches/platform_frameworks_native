@@ -21,15 +21,10 @@ interface IMediaDrmIdAccessService {
     const String SERVICE_NAME = "media_drm_id_access";
 
     /**
-     * Checks access for the direct Binder caller.
-     */
-    boolean isAllowed();
-
-    /**
      * Checks access for the app which made the current request to a DRM HAL.
      *
-     * The caller is a trusted DRM HAL. uid and pid are captured by libbinder_ndk from the
-     * incoming Binder or HwBinder transaction rather than supplied by the app.
+     * The caller is a trusted DRM HAL. uid and pid are captured by libbinder_ndk from the incoming
+     * Binder transaction rather than supplied by the app.
      */
     boolean isAllowedFromDrmHal(int uid, int pid);
 

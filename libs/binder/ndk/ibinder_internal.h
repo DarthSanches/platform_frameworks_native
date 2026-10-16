@@ -24,6 +24,7 @@
 #include <cstring>
 #include <mutex>
 #include <optional>
+#include <string_view>
 #include <vector>
 
 #include <binder/Binder.h>
@@ -184,9 +185,6 @@ struct AIBinder_Class {
 
 // Identifies the stable AIDL operation protected by the MediaDrm ID policy. The Parcel is
 // positioned after the interface token, as it is in ABBinder::onTransact, and is always restored.
-// DRM HALs generated for API levels before transaction-name metadata was introduced are handled
-// conservatively by matching the first string argument without relying on a raw transaction
-// number.
 inline ::android::status_t AIBinder_isMediaDrmDeviceUniqueIdRequest(const AIBinder_Class* clazz,
                                                                     transaction_code_t code,
                                                                     const ::android::Parcel& data,
@@ -195,12 +193,9 @@ inline ::android::status_t AIBinder_isMediaDrmDeviceUniqueIdRequest(const AIBind
     if (!clazz->isMediaDrmPlugin() || code < FIRST_CALL_TRANSACTION) {
         return ::android::OK;
     }
-    const bool hasFunctionNames = clazz->mTransactionCodeData.names != nullptr;
-    if (hasFunctionNames) {
-        const char* const functionName = AIBinder_Class_getFunctionName(clazz, code);
-        if (functionName == nullptr || strcmp(functionName, "getPropertyByteArray") != 0) {
-            return ::android::OK;
-        }
+    const char* const functionName = AIBinder_Class_getFunctionName(clazz, code);
+    if (functionName == nullptr || strcmp(functionName, "getPropertyByteArray") != 0) {
+        return ::android::OK;
     }
 
     const size_t position = data.dataPosition();
@@ -208,9 +203,13 @@ inline ::android::status_t AIBinder_isMediaDrmDeviceUniqueIdRequest(const AIBind
     const ::android::status_t status = data.readUtf8FromUtf16(&propertyName);
     data.setDataPosition(position);
     if (status != ::android::OK) {
-        return hasFunctionNames ? status : ::android::OK;
+        return status;
     }
-    *isRequest = propertyName == "deviceUniqueId";
+    const size_t nullPosition = propertyName.find('\0');
+    const std::string_view effectivePropertyName(
+            propertyName.data(), nullPosition == std::string::npos ? propertyName.size()
+                                                                    : nullPosition);
+    *isRequest = effectivePropertyName == "deviceUniqueId";
     return ::android::OK;
 }
 
