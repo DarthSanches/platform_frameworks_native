@@ -1453,14 +1453,34 @@ TEST(NdkBinder_DeathTest, SetNullCodeMap) {
     EXPECT_DEATH(AIBinder_Class_setTransactionCodeToFunctionNameMap(nullptr, nullptr, 0), "");
 }
 
-TEST(NdkBinder, MediaDrmDeviceUniqueIdRequestPreservesParcelPosition) {
-    const char* functions[] = {"getPropertyByteArray"};
-    AIBinder_Class* clazz = AIBinder_Class_define("android.hardware.drm.IDrmPlugin", EmptyOnCreate,
-                                                  EmptyOnDestroy, EmptyOnTransact);
-    AIBinder_Class_setTransactionCodeToFunctionNameMap(clazz, functions, 1);
+class MediaDrmRequestTest : public ::testing::Test {
+   protected:
+    AIBinder_Class* createClass(const char* functionName = "getPropertyByteArray") {
+        AIBinder_Class* clazz = AIBinder_Class_define(
+                "android.hardware.drm.IDrmPlugin", EmptyOnCreate, EmptyOnDestroy, EmptyOnTransact);
+        if (functionName != nullptr) {
+            mFunctions[0] = functionName;
+            AIBinder_Class_setTransactionCodeToFunctionNameMap(clazz, mFunctions, 1);
+        }
+        return clazz;
+    }
+
+    status_t writeProperty(Parcel* data, const std::string& propertyName) {
+        const status_t status = data->writeUtf8AsUtf16(propertyName);
+        if (status == OK) {
+            data->setDataPosition(0);
+        }
+        return status;
+    }
+
+   private:
+    const char* mFunctions[1];
+};
+
+TEST_F(MediaDrmRequestTest, DeviceUniqueIdRequestPreservesParcelPosition) {
+    AIBinder_Class* clazz = createClass();
     Parcel data;
-    ASSERT_EQ(OK, data.writeUtf8AsUtf16(std::string("deviceUniqueId")));
-    data.setDataPosition(0);
+    ASSERT_EQ(OK, writeProperty(&data, "deviceUniqueId"));
 
     bool isRequest = false;
     EXPECT_EQ(OK, AIBinder_isMediaDrmDeviceUniqueIdRequest(clazz, FIRST_CALL_TRANSACTION, data,
@@ -1469,15 +1489,11 @@ TEST(NdkBinder, MediaDrmDeviceUniqueIdRequestPreservesParcelPosition) {
     EXPECT_EQ(0u, data.dataPosition());
 }
 
-TEST(NdkBinder, MediaDrmDeviceUniqueIdWithEmbeddedNullIsIntercepted) {
-    const char* functions[] = {"getPropertyByteArray"};
-    AIBinder_Class* clazz = AIBinder_Class_define("android.hardware.drm.IDrmPlugin", EmptyOnCreate,
-                                                  EmptyOnDestroy, EmptyOnTransact);
-    AIBinder_Class_setTransactionCodeToFunctionNameMap(clazz, functions, 1);
+TEST_F(MediaDrmRequestTest, DeviceUniqueIdWithEmbeddedNullIsIntercepted) {
+    AIBinder_Class* clazz = createClass();
     Parcel data;
     const std::string propertyName = std::string("deviceUniqueId") + '\0' + "suffix";
-    ASSERT_EQ(OK, data.writeUtf8AsUtf16(propertyName));
-    data.setDataPosition(0);
+    ASSERT_EQ(OK, writeProperty(&data, propertyName));
 
     bool isRequest = false;
     EXPECT_EQ(OK, AIBinder_isMediaDrmDeviceUniqueIdRequest(clazz, FIRST_CALL_TRANSACTION, data,
@@ -1486,14 +1502,10 @@ TEST(NdkBinder, MediaDrmDeviceUniqueIdWithEmbeddedNullIsIntercepted) {
     EXPECT_EQ(0u, data.dataPosition());
 }
 
-TEST(NdkBinder, MediaDrmUnrelatedPropertyIsNotIntercepted) {
-    const char* functions[] = {"getPropertyByteArray"};
-    AIBinder_Class* clazz = AIBinder_Class_define("android.hardware.drm.IDrmPlugin", EmptyOnCreate,
-                                                  EmptyOnDestroy, EmptyOnTransact);
-    AIBinder_Class_setTransactionCodeToFunctionNameMap(clazz, functions, 1);
+TEST_F(MediaDrmRequestTest, UnrelatedPropertyIsNotIntercepted) {
+    AIBinder_Class* clazz = createClass();
     Parcel data;
-    ASSERT_EQ(OK, data.writeUtf8AsUtf16(std::string("vendorDefinedProperty")));
-    data.setDataPosition(0);
+    ASSERT_EQ(OK, writeProperty(&data, "vendorDefinedProperty"));
 
     bool isRequest = true;
     EXPECT_EQ(OK, AIBinder_isMediaDrmDeviceUniqueIdRequest(clazz, FIRST_CALL_TRANSACTION, data,
@@ -1502,12 +1514,10 @@ TEST(NdkBinder, MediaDrmUnrelatedPropertyIsNotIntercepted) {
     EXPECT_EQ(0u, data.dataPosition());
 }
 
-TEST(NdkBinder, MediaDrmTransactionWithoutFunctionNameTableIsNotParsed) {
-    AIBinder_Class* clazz = AIBinder_Class_define("android.hardware.drm.IDrmPlugin", EmptyOnCreate,
-                                                  EmptyOnDestroy, EmptyOnTransact);
+TEST_F(MediaDrmRequestTest, TransactionWithoutFunctionNameTableIsNotParsed) {
+    AIBinder_Class* clazz = createClass(nullptr);
     Parcel data;
-    ASSERT_EQ(OK, data.writeUtf8AsUtf16(std::string("deviceUniqueId")));
-    data.setDataPosition(0);
+    ASSERT_EQ(OK, writeProperty(&data, "deviceUniqueId"));
 
     bool isRequest = false;
     EXPECT_EQ(OK, AIBinder_isMediaDrmDeviceUniqueIdRequest(clazz, FIRST_CALL_TRANSACTION, data,
@@ -1516,11 +1526,8 @@ TEST(NdkBinder, MediaDrmTransactionWithoutFunctionNameTableIsNotParsed) {
     EXPECT_EQ(0u, data.dataPosition());
 }
 
-TEST(NdkBinder, MediaDrmMetadataTransactionsAreNotParsed) {
-    const char* functions[] = {"getPropertyByteArray"};
-    AIBinder_Class* clazz = AIBinder_Class_define("android.hardware.drm.IDrmPlugin", EmptyOnCreate,
-                                                  EmptyOnDestroy, EmptyOnTransact);
-    AIBinder_Class_setTransactionCodeToFunctionNameMap(clazz, functions, 1);
+TEST_F(MediaDrmRequestTest, MetadataTransactionsAreNotParsed) {
+    AIBinder_Class* clazz = createClass();
     Parcel data;
 
     for (const transaction_code_t code : {0x00fffffd, 0x00fffffe}) {
@@ -1531,14 +1538,10 @@ TEST(NdkBinder, MediaDrmMetadataTransactionsAreNotParsed) {
     }
 }
 
-TEST(NdkBinder, MediaDrmStringPropertyMethodIsNotIntercepted) {
-    const char* functions[] = {"getPropertyString"};
-    AIBinder_Class* clazz = AIBinder_Class_define("android.hardware.drm.IDrmPlugin", EmptyOnCreate,
-                                                  EmptyOnDestroy, EmptyOnTransact);
-    AIBinder_Class_setTransactionCodeToFunctionNameMap(clazz, functions, 1);
+TEST_F(MediaDrmRequestTest, StringPropertyMethodIsNotIntercepted) {
+    AIBinder_Class* clazz = createClass("getPropertyString");
     Parcel data;
-    ASSERT_EQ(OK, data.writeUtf8AsUtf16(std::string("deviceUniqueId")));
-    data.setDataPosition(0);
+    ASSERT_EQ(OK, writeProperty(&data, "deviceUniqueId"));
 
     bool isRequest = true;
     EXPECT_EQ(OK, AIBinder_isMediaDrmDeviceUniqueIdRequest(clazz, FIRST_CALL_TRANSACTION, data,
@@ -1547,11 +1550,8 @@ TEST(NdkBinder, MediaDrmStringPropertyMethodIsNotIntercepted) {
     EXPECT_EQ(0u, data.dataPosition());
 }
 
-TEST(NdkBinder, MalformedMediaDrmPropertyParcelFailsBeforeDispatch) {
-    const char* functions[] = {"getPropertyByteArray"};
-    AIBinder_Class* clazz = AIBinder_Class_define("android.hardware.drm.IDrmPlugin", EmptyOnCreate,
-                                                  EmptyOnDestroy, EmptyOnTransact);
-    AIBinder_Class_setTransactionCodeToFunctionNameMap(clazz, functions, 1);
+TEST_F(MediaDrmRequestTest, MalformedPropertyParcelFailsBeforeDispatch) {
+    AIBinder_Class* clazz = createClass();
     Parcel data;
 
     bool isRequest = false;
